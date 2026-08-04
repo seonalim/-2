@@ -222,6 +222,23 @@ def parse_amount(raw):
         return None
 
 
+def format_won(amount):
+    """원 단위 숫자를 '1,234,567,890원' + (1억원 이상이면) '12.3억원' 형태로 함께 보여준다.
+    쉼표 없는 큰 숫자는 자릿수를 세기 어려워서, 실무에서 자주 쓰는 억원 단위를 같이 표기한다."""
+    if amount is None:
+        return "-"
+    try:
+        amt = int(amount)
+    except (TypeError, ValueError):
+        return str(amount)
+    sign = "-" if amt < 0 else ""
+    amt_abs = abs(amt)
+    eok = amt_abs / 100_000_000  # 1억 = 100,000,000
+    if eok >= 1:
+        return f"{sign}{eok:,.1f}억원 ({sign}{amt_abs:,}원)"
+    return f"{sign}{amt_abs:,}원"
+
+
 def sum_matching(accounts, sj_div, patterns):
     """여러 하위 계정으로 나뉠 수 있는 항목(매출채권, 대손충당금 등)을 모두 더한다.
     두 번째 반환값은 실제로 어떤 계정명·금액이 합산에 포함됐는지 보여주는 상세 내역
@@ -549,11 +566,44 @@ with st.sidebar.expander("📈 거시경제 벤치마크 (선택, 한국은행 E
         "정확한 통계표코드·통계항목코드가 나옵니다. 그 값을 아래에 그대로 입력해주세요."
     )
     ecos_key_input = st.text_input("한국은행 ECOS API 키", value=get_ecos_api_key(), type="password")
-    ecos_stat_code = st.text_input("통계표코드", placeholder="ecos.bok.or.kr에서 확인한 코드 입력")
-    ecos_item_code = st.text_input("통계항목코드 (해당 통계표에 필요한 경우만)", placeholder="선택 입력")
-    ecos_cycle_label = st.selectbox("주기", ["연간(A)", "분기(Q)", "월(M)"], index=0)
+    ecos_cycle_label = st.selectbox("주기 (아래 모든 분석에 공통 적용)", ["연간(A)", "분기(Q)", "월(M)"], index=0)
     ecos_cycle_code = {"연간(A)": "A", "분기(Q)": "Q", "월(M)": "M"}[ecos_cycle_label]
+
+    st.markdown("**① 업계 벤치마크 (추이 그래프에 겹쳐 표시)**")
+    ecos_stat_code = st.text_input("통계표코드", placeholder="예: 카드/가계대출 연체율 코드")
+    ecos_item_code = st.text_input("통계항목코드 (필요한 경우만)", placeholder="선택 입력", key="ecos_item1")
     use_ecos = st.checkbox("연도별 추이 그래프에 함께 표시하기", value=False)
+
+    st.markdown("**② 충당금 적립의 선제성(리드-래그) 검증**")
+    st.caption("경기선행지수·실업률처럼 '미리 나빠지는' 지표를 넣으면, 이 회사의 충당금이 "
+               "거시 악화 신호보다 먼저 움직였는지 뒤늦게 움직였는지 비교해줍니다.")
+    st.caption(
+        "⚠ 이 통계는 코드를 확신 있게 찾지 못해 기본값을 못 넣었어요. ecos.bok.or.kr에서 "
+        "'경기종합지수(선행지수 순환변동치)' 또는 '실업률'로 검색해서 'Open API' 메뉴의 코드를 넣어주세요."
+    )
+    ecos_leading_code = st.text_input("선행지표 통계표코드", placeholder="ecos.bok.or.kr에서 확인한 코드 입력")
+    ecos_leading_item = st.text_input("통계항목코드 (필요한 경우만)", placeholder="선택 입력", key="ecos_item2")
+    use_ecos_leading = st.checkbox("선제성 분석 실행", value=False)
+
+    st.markdown("**③ 자산 성장률 이상 탐지**")
+    st.caption("가계신용·기업대출처럼 업계 전체 대출/신용 '잔액' 통계를 넣으면, 이 회사의 "
+               "대출채권류 증가율이 업계 평균보다 유독 빠른지 비교해줍니다.")
+    st.caption(
+        "'가계신용' 통계표코드로 151Y001을 기본값으로 넣어뒀는데, 이건 KOSIS(통계청) 미러 "
+        "페이지 하나로만 교차 확인한 거라 100% 확신은 못 해요(지난번에 코드를 잘못 넣은 적이 "
+        "있어서 더 조심스럽습니다). 실행해보고 데이터가 안 나오면 ecos.bok.or.kr에서 "
+        "'가계신용'으로 검색해 직접 확인한 코드로 바꿔주세요."
+    )
+    ecos_credit_code = st.text_input("신용잔액 통계표코드", value="151Y001")
+    ecos_credit_item = st.text_input("통계항목코드 (필요한 경우만)", placeholder="선택 입력", key="ecos_item3")
+    use_ecos_credit = st.checkbox("자산 성장률 비교 실행", value=False)
+
+    st.markdown("**④ 기준금리 민감도**")
+    st.caption("한국은행 기준금리 통계표코드를 기본값으로 넣어뒀어요(722Y001 / 0101000). "
+               "혹시 데이터가 안 나오면 ecos.bok.or.kr에서 직접 확인한 값으로 바꿔주세요.")
+    ecos_rate_code = st.text_input("기준금리 통계표코드", value="722Y001")
+    ecos_rate_item = st.text_input("통계항목코드", value="0101000", key="ecos_item4")
+    use_ecos_rate = st.checkbox("기준금리 민감도 분석 실행", value=False)
 
 run = st.button("분석 실행", type="primary", use_container_width=False)
 
@@ -747,20 +797,20 @@ if run:
                 with col_a:
                     st.caption("분모 계정 (매출채권/대출채권류)")
                     if comp["base"]:
+                        base_rows = [(nm, format_won(amt)) for nm, amt in comp["base"]]
                         st.dataframe(
-                            pd.DataFrame(comp["base"], columns=["계정명", "금액"]),
+                            pd.DataFrame(base_rows, columns=["계정명", "금액"]),
                             hide_index=True, use_container_width=True,
-                            column_config={"금액": st.column_config.NumberColumn("금액", format="%d")},
                         )
                     else:
                         st.caption("(내역 없음)")
                 with col_b:
                     st.caption("분자 계정 (대손충당금/신용손실충당금류)")
                     if comp["provision"]:
+                        provision_rows = [(nm, format_won(amt)) for nm, amt in comp["provision"]]
                         st.dataframe(
-                            pd.DataFrame(comp["provision"], columns=["계정명", "금액"]),
+                            pd.DataFrame(provision_rows, columns=["계정명", "금액"]),
                             hide_index=True, use_container_width=True,
-                            column_config={"금액": st.column_config.NumberColumn("금액", format="%d")},
                         )
                     else:
                         st.caption("(내역 없음)")
@@ -824,6 +874,124 @@ if run:
                     )
     else:
         st.caption("추이를 그리려면 '추이 조회 기간'을 2개년 이상으로 늘려주세요.")
+
+    # ---------------- 기능 4: 한국은행 ECOS 통계 기반 추가 분석 ----------------
+    any_extra_analysis = (use_ecos_leading and ecos_key_input and ecos_leading_code) or \
+                          (use_ecos_credit and ecos_key_input and ecos_credit_code) or \
+                          (use_ecos_rate and ecos_key_input and ecos_rate_code)
+    if any_extra_analysis:
+        st.subheader("🔬 한국은행 통계 기반 추가 분석")
+
+        # ② 충당금 적립의 선제성(리드-래그) 검증
+        if use_ecos_leading and ecos_key_input and ecos_leading_code:
+            st.markdown("**충당금 적립의 선제성(리드-래그) 검증**")
+            try:
+                lo, hi = ecos_period_range(years, ecos_cycle_code)
+                leading_rows = fetch_ecos_series(ecos_key_input, ecos_leading_code, ecos_cycle_code,
+                                                  lo, hi, ecos_leading_item)
+                if leading_rows:
+                    lead_df = pd.DataFrame(leading_rows)
+                    lead_df["year"] = lead_df["time"].astype(str).str[:4]
+                    lead_year_df = lead_df.groupby("year", as_index=False)["value"].mean().sort_values("year")
+                    lead_year_df["leading_yoy"] = lead_year_df["value"].diff()
+                    lead_label = f'{leading_rows[0].get("stat_name") or "선행지표"} ({leading_rows[0].get("unit") or "단위 미상"})'
+
+                    trend_for_lead = panel[panel["ratio"].notna()].sort_values(["company", "year"]).copy()
+                    trend_for_lead["yoy_change"] = trend_for_lead.groupby("company")["ratio"].diff()
+                    merged = trend_for_lead.merge(
+                        lead_year_df.rename(columns={"value": lead_label, "leading_yoy": f"{lead_label} 전년대비 변화"}),
+                        on="year", how="left",
+                    )
+                    show1 = merged[["company", "year", "ratio", "yoy_change", lead_label, f"{lead_label} 전년대비 변화"]].rename(
+                        columns={"company": "회사", "year": "연도", "ratio": "설정률(%)", "yoy_change": "설정률 전년대비 변화(%p)"}
+                    )
+                    st.dataframe(show1, use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"{lead_label}이(가) 나빠진 시점과, 각 회사의 설정률이 오른 시점을 나란히 비교해보세요. "
+                        "선행지표 악화보다 설정률 상승이 늦게 나타난다면 '충당금 적립이 후행적'이라는 방증일 수 있습니다. "
+                        "다만 연도 수가 적어(보통 3~5개년) 통계적 유의성을 검증한 건 아니고, 눈으로 비교하는 참고용입니다."
+                    )
+                else:
+                    st.warning("선행지표 데이터를 찾지 못했습니다. 통계표코드/통계항목코드를 확인해주세요.")
+            except Exception as e:
+                st.warning(f"선행지표를 불러오지 못했습니다: {e}")
+
+        # ③ 자산 성장률 이상 탐지
+        if use_ecos_credit and ecos_key_input and ecos_credit_code:
+            st.markdown("**자산 성장률 이상 탐지 (업계 신용 증가율 대비)**")
+            try:
+                lo, hi = ecos_period_range(years, ecos_cycle_code)
+                credit_rows = fetch_ecos_series(ecos_key_input, ecos_credit_code, ecos_cycle_code,
+                                                 lo, hi, ecos_credit_item)
+                if credit_rows:
+                    credit_df = pd.DataFrame(credit_rows)
+                    credit_df["year"] = credit_df["time"].astype(str).str[:4]
+                    credit_year_df = credit_df.groupby("year", as_index=False)["value"].mean().sort_values("year")
+                    credit_year_df["macro_growth_pct"] = credit_year_df["value"].pct_change() * 100
+                    credit_label = f'{credit_rows[0].get("stat_name") or "업계 신용잔액"} ({credit_rows[0].get("unit") or "단위 미상"})'
+
+                    asset_df = panel[panel["base_amount"].notna()].sort_values(["company", "year"]).copy()
+                    asset_df["company_growth_pct"] = asset_df.groupby("company")["base_amount"].pct_change() * 100
+                    merged2 = asset_df.merge(credit_year_df[["year", "macro_growth_pct"]], on="year", how="left")
+                    merged2 = merged2.dropna(subset=["company_growth_pct", "macro_growth_pct"]).copy()
+                    if not merged2.empty:
+                        merged2["초과증가율(%p)"] = (merged2["company_growth_pct"] - merged2["macro_growth_pct"]).round(2)
+                        merged2["company_growth_pct"] = merged2["company_growth_pct"].round(2)
+                        merged2["macro_growth_pct"] = merged2["macro_growth_pct"].round(2)
+                        show2 = merged2[["company", "year", "company_growth_pct", "macro_growth_pct", "초과증가율(%p)"]].rename(
+                            columns={"company": "회사", "year": "연도", "company_growth_pct": "회사 자산증가율(%)",
+                                     "macro_growth_pct": f"{credit_label} 증가율(%)"}
+                        )
+                        st.dataframe(show2, use_container_width=True, hide_index=True)
+                        flagged2 = show2[show2["초과증가율(%p)"] >= 10]
+                        if not flagged2.empty:
+                            st.warning("⚠ 업계 평균보다 자산이 10%p 이상 빠르게 늘어난 회사·연도입니다. "
+                                       "공격적 자산 확대 이후 부실 위험이 커질 수 있어 추가 검토가 필요할 수 있어요.")
+                            st.dataframe(flagged2, use_container_width=True, hide_index=True)
+                        st.caption("※ '10%p 이상'은 통계적으로 검증된 기준이 아니라 참고용 임의 기준입니다. 회사·업종 특성에 맞게 판단해주세요.")
+                    else:
+                        st.info("비교 가능한 연도(전년 데이터가 있는 연도)가 부족합니다. 추이 조회 기간을 늘려보세요.")
+                else:
+                    st.warning("업계 신용잔액 데이터를 찾지 못했습니다. 통계표코드/통계항목코드를 확인해주세요.")
+            except Exception as e:
+                st.warning(f"업계 신용잔액 통계를 불러오지 못했습니다: {e}")
+
+        # ④ 기준금리 민감도
+        if use_ecos_rate and ecos_key_input and ecos_rate_code:
+            st.markdown("**기준금리 민감도**")
+            try:
+                lo, hi = ecos_period_range(years, ecos_cycle_code)
+                rate_rows = fetch_ecos_series(ecos_key_input, ecos_rate_code, ecos_cycle_code,
+                                               lo, hi, ecos_rate_item)
+                if rate_rows:
+                    rate_df = pd.DataFrame(rate_rows)
+                    rate_df["year"] = rate_df["time"].astype(str).str[:4]
+                    rate_year_df = rate_df.groupby("year", as_index=False)["value"].mean().sort_values("year")
+                    rate_label = f'{rate_rows[0].get("stat_name") or "기준금리"} ({rate_rows[0].get("unit") or "%"})'
+
+                    ratio_trend = panel[panel["ratio"].notna()].groupby("year", as_index=False)["ratio"].mean()
+                    rate_chart_df = ratio_trend.merge(rate_year_df[["year", "value"]], on="year", how="left")
+                    if rate_chart_df["value"].notna().any():
+                        ratio_line = alt.Chart(rate_chart_df).mark_line(point=True, color="#0d9488").encode(
+                            x=alt.X("year:O", title="사업연도"),
+                            y=alt.Y("ratio:Q", title="비교 대상 평균 설정률(%)", axis=alt.Axis(titleColor="#0d9488")),
+                        )
+                        rate_line = alt.Chart(rate_chart_df).mark_line(point=True, strokeDash=[4, 3], color="#dc2626").encode(
+                            x=alt.X("year:O", title="사업연도"),
+                            y=alt.Y("value:Q", title=rate_label, axis=alt.Axis(titleColor="#dc2626")),
+                        )
+                        st.altair_chart(alt.layer(ratio_line, rate_line).resolve_scale(y="independent"),
+                                         use_container_width=True)
+                        st.caption(
+                            f"청록 실선(왼쪽 축) = 비교 대상 회사들의 평균 설정률(%), 빨간 점선(오른쪽 축) = {rate_label}. "
+                            "기준금리 변화와 설정률이 같은 방향으로 움직이는지 참고용으로만 보세요 (인과관계 증명이 아닙니다)."
+                        )
+                    else:
+                        st.warning("기준금리 데이터를 찾지 못했습니다. 통계표코드/통계항목코드를 확인해주세요.")
+                else:
+                    st.warning("기준금리 데이터를 찾지 못했습니다. 통계표코드/통계항목코드를 확인해주세요.")
+            except Exception as e:
+                st.warning(f"기준금리 통계를 불러오지 못했습니다: {e}")
 
     csv = panel.to_csv(index=False).encode("utf-8-sig")
     st.download_button("전체 결과(모든 연도) CSV 다운로드", csv, file_name=f"bad_debt_ratio_{base_year}_{n_years}y.csv", mime="text/csv")
