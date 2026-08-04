@@ -18,6 +18,9 @@
    "설정률만으로는 판단이 안 서는" 문제를 보완합니다.
 3) 연도별 추이(시계열): 최근 N개년의 비율 변화를 선그래프로 보여주고, 전년 대비 급변동을 표시합니다.
 4) DART 원문 링크: 각 회사의 실제 공시 원문(사업보고서) 페이지로 바로 이동하는 링크를 제공합니다.
+5) 계정 구성 내역 공개: 특히 방식 B(금융회사형)는 회사마다 "대출채권"이 아니라 "카드채권"/
+   "할부금융자산"/"리스채권" 등 제각각 다른 계정명을 쓰기 때문에, 여러 계정명을 넓게 훑어
+   합산합니다. 어떤 계정이 실제로 합산에 포함됐는지 펼쳐서 바로 확인할 수 있습니다.
 
 배포 방법 (요약)
 ----------------
@@ -30,6 +33,7 @@
 """
 
 import io
+import os
 import re
 import time
 import difflib
@@ -75,7 +79,19 @@ PRESET_GROUPS = {
 
 
 def get_api_key():
-    key = st.secrets.get("DART_API_KEY", "") if hasattr(st, "secrets") else ""
+    """DART API 키를 여러 방식으로 찾아본다.
+    - Streamlit Cloud: Secrets 관리 화면에 등록하면 st.secrets로 읽힘
+    - Hugging Face Spaces 등: "Repository secrets/Variables"에 등록하면 환경변수로 주입됨
+    - 둘 다 없으면 사이드바에서 직접 입력받음
+    """
+    key = ""
+    try:
+        if hasattr(st, "secrets"):
+            key = st.secrets.get("DART_API_KEY", "")
+    except Exception:
+        key = ""
+    if not key:
+        key = os.environ.get("DART_API_KEY", "")
     if not key:
         key = st.sidebar.text_input("DART API 키 (Secrets에 등록 안 했다면 여기 직접 입력)", type="password")
     return key
@@ -137,8 +153,10 @@ def parse_amount(raw):
 
 
 def sum_matching(accounts, sj_div, patterns):
-    """여러 하위 계정으로 나뉠 수 있는 항목(매출채권, 대손충당금 등)을 모두 더한다."""
-    total, matched_names = 0, []
+    """여러 하위 계정으로 나뉠 수 있는 항목(매출채권, 대손충당금 등)을 모두 더한다.
+    두 번째 반환값은 실제로 어떤 계정명·금액이 합산에 포함됐는지 보여주는 상세 내역
+    (구성 내역 투명성 확보용 — 감사 관점에서 "왜 이 숫자가 나왔는지" 바로 확인 가능)."""
+    total, matched_details = 0, []
     for a in accounts:
         if a.get("sj_div") != sj_div:
             continue
@@ -147,8 +165,8 @@ def sum_matching(accounts, sj_div, patterns):
             amt = parse_amount(a.get("thstrm_amount"))
             if amt:
                 total += abs(amt)
-                matched_names.append(name)
-    return (total, matched_names) if matched_names else (None, [])
+                matched_details.append((name, amt))
+    return (total, matched_details) if matched_details else (None, [])
 
 
 def get_single(accounts, sj_divs, patterns):
@@ -179,6 +197,7 @@ def extract_full_metrics(company: str, accounts: list) -> dict:
         "ratio": None, "note": "", "rcept_no": None, "dart_link": None,
         "total_assets": None, "total_equity": None, "net_income": None,
         "equity_ratio": None, "roa": None, "receivable_turnover": None,
+        "base_components": [], "provision_components": [],
     }
     if not accounts:
         result["note"] = "재무제표 데이터 없음"
@@ -189,25 +208,37 @@ def extract_full_metrics(company: str, accounts: list) -> dict:
         result["dart_link"] = DART_VIEWER_URL.format(rcept_no=result["rcept_no"])
 
     # --- 대손충당금 설정률 (방식 A/B 자동 판별) ---
-    receivable, _ = sum_matching(accounts, "BS", ["매출채권"])
-    allowance, _ = sum_matching(accounts, "BS", ["대손충당금"])
-    loans, _ = sum_matching(accounts, "BS", ["대출채권"])
-    provision, _ = sum_matching(accounts, "CIS", ["신용손실충당금", "신용손실에대한손상차손", "대손상각", "손상차손"])
+    # 방식 B(금융회사형)의 "대출채권"은 회사마다 계정명이 제각각이라 패턴을 넓게 잡는다.
+    # 예: 카드사는 "대출채권"이 아니라 "카드채권"/"할부금융자산" 등으로 잡히는 경우가 많음.
+    LOAN_PATTERNS = ["대출채권", "대출금", "카드채권", "신용카드채권", "할부금융자산",
+                     "리스채권", "여신금융자산", "여신채권"]
+    PROVISION_PATTERNS = ["신용손실충당금", "신용손실에대한손상차손", "대손상각", "손상차손"]
+
+    receivable, receivable_detail = sum_matching(accounts, "BS", ["매출채권"])
+    allowance, allowance_detail = sum_matching(accounts, "BS", ["대손충당금"])
+    loans, loans_detail = sum_matching(accounts, "BS", LOAN_PATTERNS)
+    provision, provision_detail = sum_matching(accounts, "CIS", PROVISION_PATTERNS)
 
     if receivable and allowance:
         result.update(method="A. 대손충당금(잔액)/매출채권(잔액)", base_amount=receivable,
                        provision_amount=allowance, ratio=round(allowance / receivable * 100, 3),
                        note="정상 산출")
+        result["base_components"] = receivable_detail
+        result["provision_components"] = allowance_detail
     elif loans and provision:
         result.update(method="B. 신용손실충당금 신규적립액/대출채권(잔액) [금융회사형]",
                        base_amount=loans, provision_amount=provision,
                        ratio=round(provision / loans * 100, 3), note="정상 산출 (은행/금융지주 방식)")
+        result["base_components"] = loans_detail
+        result["provision_components"] = provision_detail
     elif receivable and not allowance:
         result.update(base_amount=receivable, note="매출채권은 찾았으나 대손충당금 별도 계정 미발견 (주석 원문 확인 필요)")
+        result["base_components"] = receivable_detail
     elif loans and not provision:
-        result.update(base_amount=loans, note="대출채권은 찾았으나 신용손실충당금 항목 미발견 (주석 원문 확인 필요)")
+        result.update(base_amount=loans, note="대출채권(류)은 찾았으나 신용손실충당금 항목 미발견 (주석 원문 확인 필요)")
+        result["base_components"] = loans_detail
     else:
-        result["note"] = "매출채권/대출채권 계정 자체를 찾지 못함 (업종 특성상 해당 없음 가능)"
+        result["note"] = "매출채권/대출채권(류) 계정 자체를 찾지 못함 (업종 특성상 해당 없음 가능)"
 
     # --- 교차검증 지표 (기능 2) : 모든 회사 공통 ---
     total_assets, _ = get_single(accounts, ["BS"], ["자산총계"])
@@ -517,6 +548,7 @@ if run:
         st.caption("🔎 회사명 매칭 결과: " + " · ".join(match_notes))
 
     all_rows = []
+    components_map = {}  # (company, year) -> {"base": [...], "provision": [...]} — 구성 내역(방식 B 등 계정명 breakdown)
     total_steps = len(companies) * len(years)
     progress = st.progress(0.0, text="데이터 수집 중...")
     step = 0
@@ -540,6 +572,12 @@ if run:
                            "note": f"데이터 처리 중 오류: {e}"}
                 row["year"] = yr
                 row["input_name"] = company
+                # 구성 내역은 panel(표/CSV용) 밖으로 따로 빼서 보관 — 리스트가 그대로 셀에 들어가면
+                # 표 렌더링/CSV 저장이 지저분해지므로, 화면엔 별도 펼침(expander)으로 보여준다.
+                base_comp = row.pop("base_components", [])
+                prov_comp = row.pop("provision_components", [])
+                if base_comp or prov_comp:
+                    components_map[(official or company, yr)] = {"base": base_comp, "provision": prov_comp}
                 all_rows.append(row)
             progress.progress(step / total_steps, text=f"{official or company} {yr}년 처리 완료")
     progress.empty()
@@ -590,6 +628,39 @@ if run:
         col_config["dart_link"] = st.column_config.LinkColumn("DART 원문", display_text="공시 보기 →")
 
     st.dataframe(latest[display_cols], use_container_width=True, hide_index=True, column_config=col_config)
+
+    # ---------------- 계정 구성 내역 (특히 금융회사형에서 "대출채권류"가 어떤 계정들의 합인지 투명하게 공개) ----------------
+    base_year_components = {name: comp for (name, yr), comp in components_map.items() if yr == base_year}
+    if base_year_components:
+        with st.expander(f"📋 {base_year}년 계정 구성 내역 보기 (어떤 하위 계정이 합산됐는지)"):
+            st.caption(
+                "카드사·캐피탈사는 '대출채권'이 아니라 '카드채권'/'할부금융자산'/'리스채권' 등으로 "
+                "잡히는 경우가 많아, 여러 계정명을 넓게 훑어 합산합니다. 아래에서 실제로 어떤 계정이 "
+                "합산에 포함됐는지 확인해 계산이 타당한지 점검할 수 있습니다."
+            )
+            for name, comp in base_year_components.items():
+                st.markdown(f"**{name}**")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.caption("분모 계정 (매출채권/대출채권류)")
+                    if comp["base"]:
+                        st.dataframe(
+                            pd.DataFrame(comp["base"], columns=["계정명", "금액"]),
+                            hide_index=True, use_container_width=True,
+                            column_config={"금액": st.column_config.NumberColumn("금액", format="%d")},
+                        )
+                    else:
+                        st.caption("(내역 없음)")
+                with col_b:
+                    st.caption("분자 계정 (대손충당금/신용손실충당금류)")
+                    if comp["provision"]:
+                        st.dataframe(
+                            pd.DataFrame(comp["provision"], columns=["계정명", "금액"]),
+                            hide_index=True, use_container_width=True,
+                            column_config={"금액": st.column_config.NumberColumn("금액", format="%d")},
+                        )
+                    else:
+                        st.caption("(내역 없음)")
 
     # ---------------- 기능 3: 연도별 추이 ----------------
     st.subheader("연도별 추이")
