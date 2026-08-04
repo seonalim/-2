@@ -117,7 +117,7 @@ def fetch_full_financials(api_key: str, corp_code: str, bsns_year: str, reprt_co
         "reprt_code": reprt_code,
         "fs_div": fs_div,
     }
-    resp = dart_get(f"{BASE_URL}/fnlttSinglAcntAll.json", params, timeout=15, retries=1)
+    resp = dart_get(f"{BASE_URL}/fnlttSinglAcntAll.json", params, timeout=15, retries=2, backoff=1.5)
     data = resp.json()
     if data.get("status") != "000":
         return []
@@ -527,8 +527,16 @@ if run:
                 all_rows.append({"company": company, "year": yr, "method": None, "ratio": None,
                                   "note": "유사한 회사명을 DART에서 찾지 못함 (표기를 다시 확인해주세요)"})
             else:
-                accounts = fetch_full_financials(api_key, corp_code, yr, "11011", fs_div_code)
-                row = extract_full_metrics(official, accounts)
+                try:
+                    accounts = fetch_full_financials(api_key, corp_code, yr, "11011", fs_div_code)
+                    row = extract_full_metrics(official, accounts)
+                except requests.exceptions.RequestException:
+                    row = {"company": official, "method": None, "ratio": None,
+                           "note": "DART 서버 연결 문제로 이 회사/연도 데이터를 가져오지 못했습니다 (재시도했지만 실패). "
+                                   "'분석 실행'을 다시 눌러 재시도해보세요."}
+                except Exception as e:
+                    row = {"company": official, "method": None, "ratio": None,
+                           "note": f"데이터 처리 중 오류: {e}"}
                 row["year"] = yr
                 row["input_name"] = company
                 all_rows.append(row)
