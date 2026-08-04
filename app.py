@@ -69,6 +69,73 @@ def dart_get(url: str, params: dict, timeout: int = 15, retries: int = 2, backof
                 time.sleep(backoff)
     raise last_exc
 
+
+# ----------------------------------------------------------------------
+# 한국은행 ECOS (경제통계시스템) 연동 — 거시경제 벤치마크(연체율 등)를
+# 회사별 충당금 설정률 추이와 함께 보여줘서, "이 회사만의 문제인지 업계 전체
+# 추세인지"를 구분하는 데 참고할 수 있게 한다.
+# ----------------------------------------------------------------------
+ECOS_BASE_URL = "https://ecos.bok.or.kr/api"
+
+
+def get_ecos_api_key():
+    """DART와 마찬가지로 Secrets/환경변수에서 먼저 찾아보고, 없으면 빈 문자열을 돌려준다
+    (최종적으로는 사이드바에서 직접 입력받음)."""
+    key = ""
+    try:
+        if hasattr(st, "secrets"):
+            key = st.secrets.get("ECOS_API_KEY", "")
+    except Exception:
+        key = ""
+    if not key:
+        key = os.environ.get("ECOS_API_KEY", "")
+    return key
+
+
+def ecos_period_range(years: list, cycle: str):
+    """조회 중인 사업연도 목록을 ECOS가 요구하는 주기별 검색시작/종료일자 형식으로 변환한다."""
+    yrs = sorted(years)
+    lo, hi = yrs[0], yrs[-1]
+    if cycle == "Q":
+        return f"{lo}Q1", f"{hi}Q4"
+    if cycle == "M":
+        return f"{lo}01", f"{hi}12"
+    return lo, hi  # 연간(A)
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def fetch_ecos_series(ecos_key: str, stat_code: str, cycle: str, start_period: str,
+                       end_period: str, item_code1: str = ""):
+    """한국은행 ECOS StatisticSearch API로 거시경제 통계 시계열을 가져온다.
+    통계표코드는 ecos.bok.or.kr에서 원하는 통계를 찾은 뒤 화면의 'Open API' 메뉴에서
+    확인할 수 있다 (예: 예금취급기관 가계대출 연체율).
+    URL 안에 인증키가 그대로 들어가는 방식(REST path 파라미터)이라, 쿼리스트링이 아닌
+    경로 세그먼트로 조립한다."""
+    segments = [ECOS_BASE_URL, "StatisticSearch", ecos_key, "json", "kr", "1", "1000",
+                stat_code, cycle, start_period, end_period]
+    if item_code1:
+        segments.append(item_code1)
+    url = "/".join(segments)
+    # dart_get은 이름과 달리 범용 재시도 GET 래퍼라 ECOS 호출에도 그대로 재사용한다.
+    resp = dart_get(url, {}, timeout=15, retries=2, backoff=1.5)
+    data = resp.json()
+    if "StatisticSearch" not in data:
+        result = data.get("RESULT") if isinstance(data, dict) else None
+        err_msg = result.get("MESSAGE") if isinstance(result, dict) else None
+        raise ValueError(err_msg or "통계표코드/통계항목코드를 확인해주세요 (ECOS 응답에 데이터가 없습니다)")
+    rows = data["StatisticSearch"].get("row") or []
+    out = []
+    for r in rows:
+        try:
+            val = float(r.get("DATA_VALUE"))
+        except (TypeError, ValueError):
+            continue
+        out.append({"time": r.get("TIME"), "value": val,
+                     "stat_name": r.get("STAT_NAME"), "unit": r.get("UNIT_NAME"),
+                     "item_name": r.get("ITEM_NAME1")})
+    return out
+
+
 st.set_page_config(page_title="동종업계 대손충당금 설정률 비교", layout="wide")
 
 # ----------------------------------------------------------------------
@@ -470,6 +537,24 @@ with col4:
     fs_div = st.selectbox("재무제표 기준", ["CFS(연결)", "OFS(별도)"])
     fs_div_code = "CFS" if fs_div.startswith("CFS") else "OFS"
 
+with st.sidebar.expander("📈 거시경제 벤치마크 (선택, 한국은행 ECOS)"):
+    st.caption(
+        "회사별 충당금 설정률 추이 옆에 한국은행 통계(예: 카드/가계대출 연체율)를 함께 표시해, "
+        "이 회사만의 변화인지 업계 전체 추세인지 참고해볼 수 있어요."
+    )
+    st.caption(
+        "통계표코드는 정확한 코드를 미리 넣어두지 않았어요(잘못된 코드를 안내하면 오히려 "
+        "헷갈릴 수 있어서요). ecos.bok.or.kr에서 원하는 통계(예: '가계대출 연체율', "
+        "'예금취급기관 대출채권 연체율' 등)를 검색한 뒤, 화면의 'Open API' 메뉴를 누르면 "
+        "정확한 통계표코드·통계항목코드가 나옵니다. 그 값을 아래에 그대로 입력해주세요."
+    )
+    ecos_key_input = st.text_input("한국은행 ECOS API 키", value=get_ecos_api_key(), type="password")
+    ecos_stat_code = st.text_input("통계표코드", placeholder="ecos.bok.or.kr에서 확인한 코드 입력")
+    ecos_item_code = st.text_input("통계항목코드 (해당 통계표에 필요한 경우만)", placeholder="선택 입력")
+    ecos_cycle_label = st.selectbox("주기", ["연간(A)", "분기(Q)", "월(M)"], index=0)
+    ecos_cycle_code = {"연간(A)": "A", "분기(Q)": "Q", "월(M)": "M"}[ecos_cycle_label]
+    use_ecos = st.checkbox("연도별 추이 그래프에 함께 표시하기", value=False)
+
 run = st.button("분석 실행", type="primary", use_container_width=False)
 
 if run:
@@ -690,6 +775,33 @@ if run:
             color=alt.Color("company:N", legend=alt.Legend(title=None)),
             tooltip=["company", "year", "ratio", "method"]
         ).properties(height=340)
+
+        # 한국은행 ECOS 거시경제 벤치마크 겹쳐 보여주기 (선택)
+        if use_ecos and ecos_key_input and ecos_stat_code:
+            try:
+                lo, hi = ecos_period_range(years, ecos_cycle_code)
+                ecos_rows = fetch_ecos_series(ecos_key_input, ecos_stat_code, ecos_cycle_code,
+                                               lo, hi, ecos_item_code)
+                if ecos_rows:
+                    ecos_df = pd.DataFrame(ecos_rows)
+                    # 분기/월 단위로 받아온 경우, 회사 데이터(연 단위)와 맞추기 위해 연평균으로 집계
+                    ecos_df["year"] = ecos_df["time"].astype(str).str[:4]
+                    ecos_year_df = ecos_df.groupby("year", as_index=False)["value"].mean()
+                    stat_label = f'{ecos_rows[0].get("stat_name") or "한국은행 통계"} ({ecos_rows[0].get("unit") or "단위 미상"})'
+                    macro_line = alt.Chart(ecos_year_df).mark_line(
+                        point=True, strokeDash=[4, 3], color="#9ca3af"
+                    ).encode(
+                        x=alt.X("year:O", title="사업연도"),
+                        y=alt.Y("value:Q", title=stat_label, axis=alt.Axis(titleColor="#6b7280")),
+                        tooltip=[alt.Tooltip("year:N", title="연도"), alt.Tooltip("value:Q", title=stat_label)],
+                    )
+                    line = alt.layer(line, macro_line).resolve_scale(y="independent")
+                    st.caption(f"점선(회색, 오른쪽 축) = {stat_label} · 출처: 한국은행 ECOS")
+                else:
+                    st.warning("한국은행 통계에서 값을 찾지 못했습니다. 통계표코드/기간을 확인해주세요.")
+            except Exception as e:
+                st.warning(f"한국은행 통계를 불러오지 못했습니다: {e} (통계표코드·통계항목코드를 다시 확인해주세요)")
+
         st.altair_chart(line, use_container_width=True)
 
         # 전년 대비 급변동 탐지
