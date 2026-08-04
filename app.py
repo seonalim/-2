@@ -7,10 +7,13 @@
 (※ "적정성 확인/판단"까지 내리는 도구가 아니라, 추가 검토가 필요한 대상을 찾아주는
    1차 스크리닝·비교 도구입니다 — 이름도 그에 맞게 "비교"로 정했습니다.)
 
-계정 표시 관행이 기업마다 달라서, 두 가지 방식을 자동으로 시도합니다.
+계정 표시 관행이 기업마다 달라서, 세 가지 방식을 자동으로 시도합니다.
   A) 일반기업형: 대손충당금(잔액) / 매출채권(잔액)  ← 재무상태표에 별도 계정으로 잡히는 경우
-  B) 금융회사형: 신용손실충당금 전입액(당기 손익) / 대출채권(잔액)  ← 은행/금융지주처럼
+  B) 금융회사형: 신용손실충당금 전입액(당기 손익) / 대출채권류(잔액)  ← 은행/금융지주처럼
      충당금 "잔액"은 순액표시라 안 잡히지만, 당기 신규 적립액은 손익계산서에 잡히는 경우
+  C) 카드사 등 혼합형: 대손충당금(잔액) / 대출채권류(잔액, 카드자산·할부금융자산 등)
+     ← 일부 카드사·캐피탈사는 IFRS9 도입 후에도 계정명은 "대손충당금"을 그대로 쓰면서
+       자산 쪽만 매출채권이 아닌 카드자산/할부금융자산 등으로 잡히는 경우 (예: 롯데카드)
 
 이번 버전에 추가된 기능
 ------------------------
@@ -207,15 +210,20 @@ def extract_full_metrics(company: str, accounts: list) -> dict:
     if result["rcept_no"]:
         result["dart_link"] = DART_VIEWER_URL.format(rcept_no=result["rcept_no"])
 
-    # --- 대손충당금 설정률 (방식 A/B 자동 판별) ---
-    # 방식 B(금융회사형)의 "대출채권"은 회사마다 계정명이 제각각이라 패턴을 넓게 잡는다.
-    # 예: 카드사는 "대출채권"이 아니라 "카드채권"/"할부금융자산" 등으로 잡히는 경우가 많음.
+    # --- 대손충당금 설정률 (방식 A/B/C 자동 판별) ---
+    # "대출채권류" 계정명은 회사마다 제각각이다. 은행은 보통 "대출채권"을 쓰지만,
+    # 카드사·캐피탈사는 실제로 확인해보니(예: 롯데카드 2024년 현황 공시) "카드자산"/
+    # "할부금융자산"/"리스자산"/"신기술금융자산"/"여신성금융자산" 등으로 잡힌다.
     LOAN_PATTERNS = ["대출채권", "대출금", "카드채권", "신용카드채권", "할부금융자산",
-                     "리스채권", "여신금융자산", "여신채권"]
-    PROVISION_PATTERNS = ["신용손실충당금", "신용손실에대한손상차손", "대손상각", "손상차손"]
+                     "리스채권", "여신금융자산", "여신채권", "카드자산", "리스자산",
+                     "신기술금융자산", "여신성금융자산"]
+    # "손실충당금"을 넓게 잡아두면 "신용손실충당금"뿐 아니라, 일부 회사가 쓰는
+    # "신용" 접두어 없는 단순 "손실충당금" 표기도 놓치지 않는다.
+    PROVISION_PATTERNS = ["신용손실충당금", "손실충당금", "신용손실에대한손상차손", "대손상각", "손상차손"]
+    ALLOWANCE_PATTERNS = ["대손충당금", "손실충당금"]
 
     receivable, receivable_detail = sum_matching(accounts, "BS", ["매출채권"])
-    allowance, allowance_detail = sum_matching(accounts, "BS", ["대손충당금"])
+    allowance, allowance_detail = sum_matching(accounts, "BS", ALLOWANCE_PATTERNS)
     loans, loans_detail = sum_matching(accounts, "BS", LOAN_PATTERNS)
     provision, provision_detail = sum_matching(accounts, "CIS", PROVISION_PATTERNS)
 
@@ -231,11 +239,21 @@ def extract_full_metrics(company: str, accounts: list) -> dict:
                        ratio=round(provision / loans * 100, 3), note="정상 산출 (은행/금융지주 방식)")
         result["base_components"] = loans_detail
         result["provision_components"] = provision_detail
+    elif loans and allowance:
+        # 일부 카드사·캐피탈사는 IFRS9(기대신용손실모형) 도입 이후에도 계정과목명 자체는
+        # 관행적으로 "대손충당금"을 그대로 쓴다 (신용손실충당금이라는 이름으로 안 바뀜).
+        # 이 경우 방식 A(매출채권 기준)도, 방식 B(신용손실충당금 기준)도 안 맞아서 놓치고 있었음.
+        result.update(method="C. 대손충당금(잔액)/대출채권류(잔액) [카드사 등 혼합형]",
+                       base_amount=loans, provision_amount=allowance,
+                       ratio=round(allowance / loans * 100, 3),
+                       note="정상 산출 (일부 카드사·캐피탈사는 '대손충당금' 계정명을 그대로 사용)")
+        result["base_components"] = loans_detail
+        result["provision_components"] = allowance_detail
     elif receivable and not allowance:
         result.update(base_amount=receivable, note="매출채권은 찾았으나 대손충당금 별도 계정 미발견 (주석 원문 확인 필요)")
         result["base_components"] = receivable_detail
     elif loans and not provision:
-        result.update(base_amount=loans, note="대출채권(류)은 찾았으나 신용손실충당금 항목 미발견 (주석 원문 확인 필요)")
+        result.update(base_amount=loans, note="대출채권(류)은 찾았으나 대손충당금/신용손실충당금 항목 미발견 (주석 원문 확인 필요)")
         result["base_components"] = loans_detail
     else:
         result["note"] = "매출채권/대출채권(류) 계정 자체를 찾지 못함 (업종 특성상 해당 없음 가능)"
