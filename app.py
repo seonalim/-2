@@ -241,10 +241,11 @@ def extract_full_metrics(company: str, accounts: list) -> dict:
 
 
 def normalize_company_name(name: str) -> str:
-    """비교용으로 이름을 정규화: (주)/㈜/주식회사 표기와 공백·특수문자를 제거."""
+    """비교용으로 이름을 정규화: (주)/㈜/주식회사 표기와 공백·특수문자를 제거하고,
+    영문 대소문자 차이(KB vs kb 등)도 같은 것으로 취급한다."""
     name = re.sub(r"\(주\)|㈜|주식회사", "", name)
     name = re.sub(r"[\s\-_.]", "", name)
-    return name.strip()
+    return name.strip().casefold()
 
 
 @st.cache_data(show_spinner=False)
